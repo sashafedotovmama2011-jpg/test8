@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 CAPTCHA_TEXT = """Здравствуйте, {name}!
 
 Перед вступлением в группу подтвердите, что вы не спам-бот.
-На решение примера дается 5 минут!
 
 🤖 Решите простую задачу:"""
 
@@ -151,7 +150,16 @@ async def timeout_checker(bot):
             if not record:
                 continue
             chat_id = record["chat_id"]
+            message_id = record.get("message_id")
             try:
+                # Удаляем сообщение бота (капча или правила)
+                if message_id:
+                    try:
+                        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+                    except Exception:
+                        pass
+
+                # Кик через бан/разбан
                 await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
                 await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
 
@@ -239,18 +247,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         correct_answer = int(parts[2])
 
         if selected_answer == correct_answer:
+            # Капча пройдена — удаляем сообщение с капчей
             record["stage"] = "rules"
             rules_text = RULES_TEXT.format(hours=RULES_TIMEOUT_HOURS)
 
             try:
-                await query.edit_message_text(
+                # Удаляем сообщение с капчей
+                await query.delete_message()
+
+                # Отправляем новое сообщение с правилами
+                sent_rules = await context.bot.send_message(
+                    chat_id=record["chat_id"],
                     text=rules_text,
                     reply_markup=make_rules_keyboard(),
                 )
+
+                # Обновляем message_id в хранилище
+                record["message_id"] = sent_rules.message_id
+
                 logger.info(f"Пользователь {user_id} прошёл капчу → показываем правила.")
             except Exception as e:
                 logger.error(f"Не удалось показать правила для {user_id}: {e}")
         else:
+            # Неверный ответ — новая капча
             question, new_correct, options = generate_captcha()
             new_text = (
                 f"❌ Неверно! Попробуйте ещё раз.\n\n"
@@ -278,10 +297,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         record["confirmed"] = True
         pending_users.pop(user_id, None)
-        await query.edit_message_text(
-            "✅ Спасибо! Вы подтвердили согласие с правилами. Добро пожаловать в группу!"
-        )
-        logger.info(f"Пользователь {user_id} согласился с правилами — доступ открыт.")
+
+        try:
+            # Удаляем сообщение с правилами
+            await query.delete_message()
+
+            # Отправляем короткое приветствие
+            await context.bot.send_message(
+                chat_id=record["chat_id"],
+                text="✅ Спасибо! Вы подтвердили согласие с правилами. Добро пожаловать в группу!",
+            )
+
+            logger.info(f"Пользователь {user_id} согласился с правилами — доступ открыт.")
+        except Exception as e:
+            logger.error(f"Не удалось удалить сообщение с правилами: {e}")
 
     elif data == "rules_no":
         if user_id not in pending_users:
@@ -293,15 +322,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_users.pop(user_id, None)
 
         try:
+            # Удаляем сообщение с правилами
+            await query.delete_message()
+
             await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
             await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
-            await query.edit_message_text(
-                "❌ Вы отказались подтвердить правила. Вы исключены из группы."
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Участник отказался подтвердить правила и был удалён из группы.",
             )
             logger.info(f"Пользователь {user_id} отказался от правил — кик.")
         except Exception as e:
             logger.error(f"Не удалось исключить пользователя {user_id}: {e}")
-            await query.edit_message_text("❌ Не удалось исключить. Обратитесь к админу.")
 
 
 # --- БЛОКИРОВКА СООБЩЕНИЙ ДО ПОДТВЕРЖДЕНИЯ ---
